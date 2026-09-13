@@ -1,0 +1,26 @@
+# Conda environment for Tabula Rasa.
+#
+#   conda env create -f environment.yml
+#   conda activate tabula-rasa
+#
+# ffmpeg is installed via conda because mediapy invokes it as a subprocess for
+# video output; it must be on PATH rather than importable. Everything else is
+# installed with pip from requirements.txt, which is also usable on its own if
+# you would rather not use conda.
+#
+# NVIDIA CUDA 12 JAX is installed by default. To run on CPU without changing the
+# environment, prefix a command with JAX_PLATFORMS=cpu. See SETUP.md for a
+# CPU-only installation.
+
+name: tabula-rasa
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.12
+  - ffmpeg
+  - pip
+  - pip:
+      - -r requirements.txt
+      - jax[cuda12]

@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<!--
+Copyright (c) Meta Platforms, Inc. and affiliates.
+All rights reserved.
+
+This source code is licensed under the license found in the
+LICENSE file in the root directory of this source tree.
+-->
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>GLTF Loader Tests</title>
+</head>
+<body>
+<pre id="results">Running...</pre>
+<script src="../gltf-loader.js"></script>
+<script>
+'use strict';
+
+const results = [];
+
+function assert(condition, message) {
+    if (!condition) throw new Error(message);
+}
+
+function approx(actual, expected, tolerance = 1e-5) {
+    return Math.abs(actual - expected) <= tolerance;
+}
+
+function assertArrayApprox(actual, expected, message, tolerance = 1e-5) {
+    assert(actual.length === expected.length, `${message}: length ${actual.length} !== ${expected.length}`);
+    for (let i = 0; i < expected.length; i++) {
+        assert(approx(actual[i], expected[i], tolerance), `${message}[${i}]: ${actual[i]} !== ${expected[i]}`);
+    }
+}
+
+function align4(value) {
+    return (value + 3) & ~3;
+}
+
+function buildGLB(json, chunks) {
+    let binaryLength = 0;
+    const bufferViews = [];
+    for (const chunk of chunks) {
+        const alignedOffset = align4(binaryLength);
+        bufferViews.push({
+            buffer: 0,
+            byteOffset: alignedOffset,
+            byteLength: chunk.byteLength
+        });
+        binaryLength = alignedOffset + chunk.byteLength;
+    }
+    binaryLength = align4(binaryLength);
+
+    const binary = new Uint8Array(binaryLength);
+    chunks.forEach((chunk, index) => {
+        binary.set(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength), bufferViews[index].byteOffset);
+    });
+
+    const document = {
+        asset: { version: '2.0' },
+        ...json,
+        buffers: [{ byteLength: binary.byteLength }],
+        bufferViews
+    };
+    const jsonBytes = new TextEncoder().encode(JSON.stringify(document));
+    const paddedJsonLength = align4(jsonBytes.byteLength);
+    const totalLength = 12 + 8 + paddedJsonLength + 8 + binary.byteLength;
+    const glb = new ArrayBuffer(totalLength);
+    const view = new DataView(glb);
+    const bytes = new Uint8Array(glb);
+
+    view.setUint32(0, 0x46546C67, true);
+    view.setUint32(4, 2, true);
+    view.setUint32(8, totalLength, true);
+    view.setUint32(12, paddedJsonLength, true);
+    view.setUint32(16, 0x4E4F534A, true);
+    bytes.fill(0x20, 20, 20 + paddedJsonLength);
+    bytes.set(jsonBytes, 20);
+
+    const binaryHeader = 20 + paddedJsonLength;
+    view.setUint32(binaryHeader, binary.byteLength, true);
+    view.setUint32(binaryHeader + 4, 0x004E4942, true);
+    bytes.set(binary, binaryHeader + 8);
+
+    return glb;
+}
+
+function makeAccessor(bufferView, componentType, count, type) {
+    return { bufferView, componentType, count, type };
+}
+
+function createRigidAnimatedGLB() {
+    const planePositions = new Float32Array([
+        -1, 0, -1,
+         1, 0, -1,
+         1, 0,  1,
+        -1, 0,  1
+    ]);
+    const planeNormals = new Float32Array([
+        0, 1, 0,
+        0, 1, 0,
+        0, 1, 0,
+        0, 1, 0
+    ]);
+    const planeIndices = new Uint16Array([0, 1, 2, 0, 2, 3]);
+    const cubePositions = new Float32Array([
+        -1, -1, -1,
+         1, -1, -1,
+         0,  1,  1
+    ]);
+    const cubeNormals = new Float32Array([
+        1, 0, 1,
+        1, 0, 1,
+        1, 0, 1
+    ]);
+    const cubeIndices = new Uint16Array([0, 1, 2]);
+    const times = new Float32Array([0, 2]);
+    const translations = new Float32Array([
+        0, 0.06, 0.39,
+        0, 0.06, -1.4
+    ]);
+    const chunks = [planePositions, planeNormals, planeIndices, cubePositions, cubeNormals, cubeIndices, times, translations];
+
+    return buildGLB({
+        scene: 0,
+        scenes: [{ nodes: [0, 1, 2] }],
+        nodes: [
+            { name: 'Plane', mesh: 0 },
+            { name: 'Cube.001', mesh: 1, translation: [0, 0.06, 0.39], scale: [0.05, 0.05, 0.1] },
+            { name: 'Cube.001.Instance', mesh: 1, translation: [0.5, 0.06, 0.39], scale: [0.05, 0.05, 0.1] }
+        ],
+        meshes: [
+            { primitives: [{ attributes: { POSITION: 0, NORMAL: 1 }, indices: 2 }] },
+            { primitives: [{ attributes: { POSITION: 3, NORMAL: 4 }, indices: 5 }] }
+        ],
+        accessors: [
+            makeAccessor(0, 5126, 4, 'VEC3'),
+            makeAccessor(1, 5126, 4, 'VEC3'),
+            makeAccessor(2, 5123, 6, 'SCALAR'),
+            makeAccessor(3, 5126, 3, 'VEC3'),
+            makeAccessor(4, 5126, 3, 'VEC3'),
+            makeAccessor(5, 5123, 3, 'SCALAR'),
+            makeAccessor(6, 5126, 2, 'SCALAR'),
+            makeAccessor(7, 5126, 2, 'VEC3')
+        ],
+        animations: [{
+            name: 'Cube.001Action',
+            samplers: [{ input: 6, output: 7, interpolation: 'LINEAR' }],
+            channels: [{ sampler: 0, target: { node: 1, path: 'translation' } }]
+        }]
+    }, chunks);
+}
+
+function createSkeletalGLB() {
+    const positions = new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]);
+    const normals = new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1]);
+    const joints = new Uint8Array([0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0]);
+    const weights = new Float32Array([1, 0, 0, 0, 0.5, 0.5, 0, 0, 0, 1, 0, 0]);
+    const indices = new Uint16Array([0, 1, 2]);
+    const inverseBindMatrices = new Float32Array([
+        1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
+        1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -1, -2, -3, 1
+    ]);
+    const times = new Float32Array([0, 1]);
+    const translations = new Float32Array([1, 0, 0, 4, 0, 0]);
+    const chunks = [positions, normals, joints, weights, indices, inverseBindMatrices, times, translations];
+
+    return buildGLB({
+        scene: 0,
+        scenes: [{ nodes: [1] }],
+        nodes: [
+            {},
+            { mesh: 0, skin: 0, children: [2] },
+            { translation: [1, 0, 0] }
+        ],
+        meshes: [{ primitives: [{
+            attributes: { POSITION: 0, NORMAL: 1, JOINTS_0: 2, WEIGHTS_0: 3 },
+            indices: 4
+        }] }],
+        skins: [{ joints: [1, 2], skeleton: 1, inverseBindMatrices: 5 }],
+        accessors: [
+            makeAccessor(0, 5126, 3, 'VEC3'),
+            makeAccessor(1, 5126, 3, 'VEC3'),
+            makeAccessor(2, 5121, 3, 'VEC4'),
+            makeAccessor(3, 5126, 3, 'VEC4'),
+            makeAccessor(4, 5123, 3, 'SCALAR'),
+            makeAccessor(5, 5126, 2, 'MAT4'),
+            makeAccessor(6, 5126, 2, 'SCALAR'),
+            makeAccessor(7, 5126, 2, 'VEC3')
+        ],
+        animations: [{
+            name: 'JointAction',
+            samplers: [{ input: 6, output: 7, interpolation: 'LINEAR' }],
+            channels: [{ sampler: 0, target: { node: 2, path: 'translation' } }]
+        }]
+    }, chunks);
+}
+
+function createFlatGLB() {
+    const positions = new Float32Array([0, 0, 0, 2, 0, 0, 0, 2, 0]);
+    const normals = new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1]);
+    const indices = new Uint16Array([0, 1, 2]);
+    return buildGLB({
+        meshes: [{ primitives: [{ attributes: { POSITION: 0, NORMAL: 1 }, indices: 2 }] }],
+        accessors: [
+            makeAccessor(0, 5126, 3, 'VEC3'),
+            makeAccessor(1, 5126, 3, 'VEC3'),
+            makeAccessor(2, 5123, 3, 'SCALAR')
+        ]
+    }, [positions, normals, indices]);
+}
+
+function createEmbeddedGLTF() {
+    const positions = new Float32Array([0, 0, 0, 2, 0, 0, 0, 2, 0]);
+    const normals = new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1]);
+    const indices = new Uint16Array([0, 1, 2]);
+    const chunks = [positions, normals, indices];
+    const bufferViews = [];
+    let binaryLength = 0;
+
+    for (const chunk of chunks) {
+        const byteOffset = align4(binaryLength);
+        bufferViews.push({buffer: 0, byteOffset, byteLength: chunk.byteLength});
+        binaryLength = byteOffset + chunk.byteLength;
+    }
+
+    const binary = new Uint8Array(align4(binaryLength));
+    chunks.forEach((chunk, index) => {
+        binary.set(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength), bufferViews[index].byteOffset);
+    });
+    const uri = `data:application/octet-stream;base64,${btoa(String.fromCharCode(...binary))}`;
+    const document = {
+        asset: {version: '2.0'},
+        buffers: [{byteLength: binary.byteLength, uri}],
+        bufferViews,
+        meshes: [{primitives: [{attributes: {POSITION: 0, NORMAL: 1}, indices: 2}]}],
+        accessors: [
+            makeAccessor(0, 5126, 3, 'VEC3'),
+            makeAccessor(1, 5126, 3, 'VEC3'),
+            makeAccessor(2, 5123, 3, 'SCALAR'),
+        ],
+    };
+    return new TextEncoder().encode(JSON.stringify(document)).buffer;
+}
+
+function createJointOverflowGLB(includeAllNodesInScene = true) {
+    const positions = new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]);
+    const normals = new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1]);
+    const indices = new Uint16Array([0, 1, 2]);
+    const times = new Float32Array([0, 1]);
+    const translations = new Float32Array([0, 0, 0, 1, 0, 0]);
+    const nodeCount = includeAllNodesInScene ? 129 : 2;
+    const nodes = Array.from({ length: nodeCount }, (_, index) => ({ mesh: 0, translation: [index, 0, 0] }));
+    const chunks = [positions, normals, indices, times, translations];
+
+    return buildGLB({
+        scene: 0,
+        scenes: [{ nodes: includeAllNodesInScene ? nodes.map((_, index) => index) : [0] }],
+        nodes,
+        meshes: [{ primitives: [{ attributes: { POSITION: 0, NORMAL: 1 }, indices: 2 }] }],
+        accessors: [
+            makeAccessor(0, 5126, 3, 'VEC3'),
+            makeAccessor(1, 5126, 3, 'VEC3'),
+            makeAccessor(2, 5123, 3, 'SCALAR'),
+            makeAccessor(3, 5126, 2, 'SCALAR'),
+            makeAccessor(4, 5126, 2, 'VEC3')
+        ],
+        animations: [{
+            samplers: [{ input: 3, output: 4, interpolation: 'LINEAR' }],
+            channels: [{ sampler: 0, target: { node: 0, path: 'translation' } }]
+        }]
+    }, chunks);
+}
+
+async function test(name, callback) {
+    try {
+        await callback();
+        results.push(`PASS ${name}`);
+    } catch (error) {
+        results.push(`FAIL ${name}: ${error.stack || error.message}`);
+    }
+}
+
+(async () => {
+    await test('rigid node transforms, instancing, animation bounds, and normals', async () => {
+        const mesh = await parseGLTF(createRigidAnimatedGLB(), 'rigid.glb');
+        assert(mesh.triangleCount === 4, `expected 4 triangles, got ${mesh.triangleCount}`);
+        assert(mesh.hasSkinning === true, 'rigid animation should activate skinning');
+        assert(mesh.skin.jointCount === 3, `expected 3 rigid joints, got ${mesh.skin.jointCount}`);
+        assertArrayApprox(mesh.skin.joints, [0, 1, 2], 'rigid joints');
+        assertArrayApprox(
+            mesh.skin.inverseBindMatrices[1],
+            [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+            'synthetic rigid inverse bind matrix'
+        );
+        assert(mesh.originalVertices[12] === -1, 'original cube X must stay node-local');
+        assert(mesh.originalVertices[13] === -1, 'original cube Y must stay node-local');
+        assert(mesh.joints[24] === 1, 'first cube instance should use node 1 joint');
+        assert(mesh.joints[36] === 2, 'second cube instance should use its own node joint');
+        assert(mesh.boundingBox.minZ <= -1.49, `animated minZ missing: ${mesh.boundingBox.minZ}`);
+        assert(mesh.boundingBox.maxZ >= 1, `rest plane maxZ missing: ${mesh.boundingBox.maxZ}`);
+
+        const cubeWorld = computeNodeWorldMatrices(mesh.nodes)[1];
+        assertArrayApprox(
+            [cubeWorld[12], cubeWorld[13], cubeWorld[14], cubeWorld[0], cubeWorld[5], cubeWorld[10]],
+            [0, 0.06, 0.39, 0.05, 0.05, 0.1],
+            'cube rest TRS'
+        );
+        const firstCubeStaticY = mesh.vertices[19] / mesh.normalization.scale - mesh.normalization.centerY;
+        assert(approx(firstCubeStaticY, -0.01), `static displayed Y should match the OBJ-compatible renderer convention: ${firstCubeStaticY}`);
+        const expectedNormal = normalize3([20, 0, 10]);
+        assertArrayApprox(
+            [mesh.normals[18], -mesh.normals[19], mesh.normals[20]],
+            expectedNormal,
+            'inverse-transpose normal'
+        );
+
+        const endTransforms = sampleAnimation(mesh.animations[0], 2, false);
+        const endMatrices = computeJointMatrices(mesh.nodes, mesh.skin, endTransforms);
+        assert(approx(endMatrices[16 + 13], 0.06), `animated Y is wrong: ${endMatrices[29]}`);
+        assert(approx(endMatrices[16 + 14], -1.4), `end translation lost: ${endMatrices[30]}`);
+    });
+
+    await test('Blender-exported glTF TRS remains unchanged in the loader', async () => {
+        const translation = [1, 2, 3];
+        const halfAngle = Math.PI / 4;
+        const rotation = [Math.sin(halfAngle), 0, 0, Math.cos(halfAngle)];
+        const scale = [2, 3, 4];
+        const gltfPosition = [0.25, 0.5, -0.75];
+        const expected = transformPosition(composeTRSMatrix(translation, rotation, scale), gltfPosition);
+        const worldMatrix = computeNodeWorldMatrices([{ translation, rotation, scale }])[0];
+        const transformed = transformPosition(worldMatrix, gltfPosition);
+        assertArrayApprox(transformed, expected, 'Blender glTF TRS');
+    });
+
+    await test('real skin indices and inverse bind matrices stay first', async () => {
+        const mesh = await parseGLTF(createSkeletalGLB(), 'skin.glb');
+        assert(mesh.hasSkinning === true, 'skeletal animation should remain enabled');
+        assert(mesh.skin.jointCount === 2, `expected the original two real joints, got ${mesh.skin.jointCount}`);
+        assertArrayApprox(mesh.skin.joints, [1, 2], 'resolved skeletal joints');
+        assertArrayApprox(mesh.skin.inverseBindMatrices[0], [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], 'first IBM');
+        assertArrayApprox(mesh.skin.inverseBindMatrices[1], [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -1, -2, -3, 1], 'second IBM');
+        assertArrayApprox(Array.from(mesh.joints.slice(0, 12)), [0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0], 'vertex joint indices');
+        assert(mesh.boundingBox.maxX >= 3, `skeletal animation bounds missing: ${mesh.boundingBox.maxX}`);
+        assert(extractGLTFSkin(mesh.gltf, mesh.binaryChunk) === mesh.skin, 'existing skin API must expose the resolved table');
+    });
+
+    await test('GLTF without nodes retains flat mesh fallback', async () => {
+        const mesh = await parseGLTF(createFlatGLB(), 'flat.glb');
+        assert(mesh.triangleCount === 1, `expected one flat triangle, got ${mesh.triangleCount}`);
+        assert(mesh.hasSkinning === false, 'flat static mesh must not activate skinning');
+        assert(approx(mesh.normalization.scale, 0.5), `unexpected flat normalization: ${mesh.normalization.scale}`);
+    });
+
+    await test('embedded-data GLTF decodes without original-buffer plumbing', async () => {
+        const mesh = await parseGLTF(createEmbeddedGLTF(), 'embedded.gltf');
+        assert(mesh.triangleCount === 1, `expected one embedded triangle, got ${mesh.triangleCount}`);
+        assertArrayApprox(mesh.indices, [0, 1, 2], 'embedded indices');
+        assert(mesh.normals.length === 9, 'embedded normals were not decoded');
+        assert(approx(mesh.normalization.scale, 0.5), `unexpected embedded normalization: ${mesh.normalization.scale}`);
+        assert(getAccessorData.length === 3, 'accessor reader retains a dead parameter');
+        assert(extractGLTFAnimations.length === 2, 'animation extraction retains a dead parameter');
+        assert(extractGLTFMesh.length === 2, 'mesh extraction retains a dead parameter before animations');
+        assert(extractGLTFSkin.length === 2, 'skin extraction retains a dead parameter');
+        assert(computeJointMatrices.length === 3, 'joint matrix calculation retains a dead parameter');
+        assert(
+            ![getAccessorData, extractGLTFAnimations, extractGLTFMesh, extractGLTFSkin]
+                .some((callback) => callback.toString().includes('originalBuffer')),
+            'glTF loader still forwards the original file buffer',
+        );
+    });
+
+    await test('inactive scene nodes do not consume joint slots', async () => {
+        const mesh = await parseGLTF(createJointOverflowGLB(false), 'inactive.glb');
+        assert(mesh.hasSkinning === true, 'active scene should remain animatable');
+        assert(mesh.skin.jointCount === 1, `expected one active rigid joint, got ${mesh.skin.jointCount}`);
+        assert(mesh.triangleCount === 1, `expected one active instance, got ${mesh.triangleCount}`);
+    });
+
+    await test('joint overflow falls back to baked static rendering', async () => {
+        const mesh = await parseGLTF(createJointOverflowGLB(), 'overflow.glb');
+        assert(mesh.hasSkinning === false, 'overflow mesh must disable skinning');
+        assert(mesh.skin === null, 'overflow mesh must not expose an unusable skin');
+        assert(mesh.triangleCount === 129, `expected all instances in static mesh, got ${mesh.triangleCount}`);
+    });
+
+    const failures = results.filter(line => line.startsWith('FAIL'));
+    document.getElementById('results').textContent = results.join('\n');
+    document.title = failures.length === 0 ? 'PASS' : 'FAIL';
+})();
+</script>
+</body>
+</html>

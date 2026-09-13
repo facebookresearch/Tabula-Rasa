@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tabula-rasa"
+version = "1.0.0"
+description = "Monte Carlo estimation of Gaussian noise with unit variance and controlled spatio-temporal correlation"
+readme = "SETUP.md"
+requires-python = ">=3.12"
+license = { text = "CC-BY-NC-4.0" }
+classifiers = [
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+
+# Versions are intentionally unpinned; see requirements.txt for the rationale.
+dependencies = [
+    "jax",
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "tqdm",
+    "mediapy",
+    "safetensors",
+    "pillow",
+    "OpenEXR",
+]
+
+[project.optional-dependencies]
+notebook = ["ipykernel"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tabula_rasa*"]

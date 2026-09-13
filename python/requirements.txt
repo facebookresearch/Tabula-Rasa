@@ -1,0 +1,20 @@
+# Runtime dependencies for Tabula Rasa.
+#
+# This standalone requirements file keeps JAX CPU-only for portability. The
+# Conda environment adds `jax[cuda12]` by default for NVIDIA GPU rendering.
+
+jax
+numpy
+scipy
+matplotlib
+tqdm
+mediapy
+safetensors
+pillow
+
+# EXR I/O in tools/. This package provides both the `OpenEXR` and `Imath`
+# modules that tools/analyze_convergence.py imports.
+OpenEXR
+
+# Only needed to run examples/experiments.ipynb.
+ipykernel

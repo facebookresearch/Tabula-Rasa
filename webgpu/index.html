@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<!--
+Copyright (c) Meta Platforms, Inc. and affiliates.
+All rights reserved.
+
+This source code is licensed under the license found in the
+LICENSE file in the root directory of this source tree.
+-->
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light">
+    <title>Tabula Rasa - WebGPU</title>
+    <style>
+        /* Contrast ratios against the surface each colour sits on, per WCAG 2.1:
+           text #000 on #fff 21.0:1 and on #f4f6f8 19.4:1 (1.4.3 AA needs 4.5);
+           muted #595959 7.0:1 and 6.5:1; accent #0a5c6b 7.6:1 and 7.0:1;
+           danger #a4161a 7.8:1; control borders #767676 4.5:1 and 4.2:1
+           (1.4.11 AA needs 3.0). Text is black throughout; the accent is reserved
+           for interactive affordances. */
+        :root {
+            --bg: #ffffff;
+            --surface: #f4f6f8;
+            --text: #000000;
+            --text-muted: #595959;
+            --accent: #0a5c6b;
+            --accent-wash: #e3eef1;
+            --border: #767676;
+            --border-decorative: #d0d7de;
+            --danger: #a4161a;
+            --danger-wash: #fdeaea;
+            --radius: 8px;
+        }
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            background: var(--bg);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            color: var(--text);
+            min-height: 100vh;
+            padding: 16px;
+            line-height: 1.4;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        h1 {
+            font-size: 1.5rem;
+            color: var(--text);
+        }
+        h2 {
+            font-size: 1rem;
+            color: var(--text);
+            margin-bottom: 10px;
+        }
+        h3 {
+            font-size: 0.9rem;
+            color: var(--text);
+            margin-bottom: 8px;
+        }
+
+        .sr-only {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border: 0;
+        }
+
+        .page-head {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+        .page-actions {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+            gap: 12px;
+        }
+        .page-switch {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            min-height: 34px;
+            margin-left: auto;
+            padding: 5px 10px;
+            background: var(--bg);
+            color: var(--accent);
+            border: 1px solid var(--accent);
+            border-radius: 4px;
+            font-weight: 700;
+            text-decoration: none;
+        }
+        .page-switch:hover {
+            background: var(--accent-wash);
+        }
+
+        /* Keyboard focus must stay visible on every interactive control (2.4.7).
+           The ring is 3:1+ against both surfaces, so it also satisfies 1.4.11. */
+        a:focus-visible,
+        button:focus-visible,
+        select:focus-visible,
+        input:focus-visible,
+        summary:focus-visible {
+            outline: 3px solid var(--accent);
+            outline-offset: 2px;
+        }
+
+        /* Viewport on the left, the control sections flowing beside it. Two
+           columns of sections on a desktop width keeps the whole UI close to one
+           screen; everything collapses to a single column when narrow. */
+        .layout {
+            display: grid;
+            grid-template-columns: minmax(0, 552px) minmax(0, 1fr);
+            gap: 16px;
+            align-items: start;
+        }
+        .controls-region {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(232px, 1fr));
+            gap: 16px;
+            align-content: start;
+        }
+        @media (max-width: 900px) {
+            .layout {
+                grid-template-columns: minmax(0, 1fr);
+            }
+        }
+        @media (min-width: 901px) {
+            #noiseCanvas {
+                width: auto;
+                height: auto;
+                max-width: 100%;
+                max-height: clamp(240px, calc(100svh - 384px), 512px);
+                margin-inline: auto;
+            }
+        }
+
+        .panel {
+            background: var(--surface);
+            border: 1px solid var(--border-decorative);
+            border-radius: var(--radius);
+            padding: 14px;
+        }
+        .viewport {
+            display: grid;
+            gap: 16px;
+        }
+        canvas {
+            display: block;
+            max-width: 100%;
+            background: var(--bg);
+            border: 1px solid var(--border);
+        }
+        .panel-head {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 4px 12px;
+            margin-bottom: 10px;
+        }
+        .panel-head h2 {
+            margin-bottom: 0;
+        }
+        .transport {
+            display: flex;
+            align-items: flex-end;
+            gap: 12px;
+            margin-top: 10px;
+        }
+        .transport .transport-time {
+            flex: 1;
+            min-width: 0;
+            margin-bottom: 0;
+        }
+        .transport .icon-button {
+            flex: none;
+            margin-bottom: 2px;
+        }
+
+        /* Short controls pair up automatically, which is what keeps the sections
+           from growing into one tall column. */
+        .control-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 10px 14px;
+        }
+        .control-grid .span-all {
+            grid-column: 1 / -1;
+        }
+        .display-inspector {
+            border-top: 1px solid var(--border-decorative);
+            margin-top: 12px;
+            padding-top: 10px;
+        }
+        .display-inspector h3 {
+            margin-bottom: 8px;
+        }
+        .display-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 192px;
+            gap: 12px;
+            align-items: start;
+        }
+        .display-controls,
+        .histogram-control,
+        .histogram-wrap {
+            min-width: 0;
+        }
+        .display-controls .transport {
+            margin-top: 8px;
+        }
+        .histogram-wrap {
+            width: 192px;
+            max-width: 100%;
+        }
+        #histogramCanvas {
+            width: 100%;
+            height: auto;
+        }
+        @media (max-width: 560px) {
+            .page-actions {
+                width: 100%;
+                justify-content: space-between;
+            }
+            .display-grid {
+                grid-template-columns: minmax(0, 1fr);
+            }
+        }
+        .control-group > label {
+            display: block;
+            margin-bottom: 3px;
+        }
+        .control-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            gap: 8px;
+            margin-bottom: 3px;
+        }
+        .control-head label {
+            margin-bottom: 0;
+        }
+        .checkbox-label {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+        }
+
+        /* Native appearance is kept so the controls stay usable in forced-colors
+           and high-contrast modes; accent-color tints them without replacing them. */
+        input[type="range"] {
+            width: 100%;
+            accent-color: var(--accent);
+        }
+        input[type="checkbox"] {
+            accent-color: var(--accent);
+            width: 1rem;
+            height: 1rem;
+            margin-top: 0.2rem;
+            flex: none;
+        }
+        select,
+        input[type="number"] {
+            width: 100%;
+            padding: 5px;
+            background: var(--bg);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            font: inherit;
+        }
+
+        /* Black like the rest of the text; the dashed underline rather than a
+           colour change is what marks it editable (1.4.1). */
+        /* min-height keeps the hit area at the 24px that WCAG 2.2 SC 2.5.8 asks
+           for; the dense layout would otherwise leave these under it. */
+        .value-display {
+            font-family: monospace;
+            font-size: inherit;
+            color: var(--text);
+            background: transparent;
+            border: none;
+            border-bottom: 1px dashed var(--accent);
+            border-radius: 0;
+            padding: 0 6px;
+            min-height: 24px;
+            min-width: 24px;
+            cursor: pointer;
+        }
+        .value-display:hover {
+            background: var(--accent-wash);
+        }
+        .value-input {
+            width: 72px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            color: var(--text);
+            font-family: monospace;
+            font-size: inherit;
+            padding: 0 2px;
+            border-radius: 3px;
+        }
+
+        .button-primary {
+            width: 100%;
+            padding: 9px;
+            background: var(--accent);
+            color: var(--bg);
+            border: 1px solid var(--accent);
+            border-radius: 4px;
+            cursor: pointer;
+            font: inherit;
+            font-weight: bold;
+        }
+        .button-primary:hover {
+            background: #084857;
+        }
+        /* 36px square clears the 24px hit area WCAG 2.2 SC 2.5.8 asks for. The
+           glyph inherits currentColor, so it stays at text contrast. */
+        .icon-button {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 36px;
+            height: 36px;
+            padding: 0;
+            background: var(--bg);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .icon-button:hover {
+            background: var(--accent-wash);
+        }
+        .icon-button .icon {
+            width: 20px;
+            height: 20px;
+            fill: currentColor;
+        }
+        .icon-button .icon-pause {
+            display: none;
+        }
+        .icon-button.is-playing .icon-pause {
+            display: block;
+        }
+        .icon-button.is-playing .icon-play {
+            display: none;
+        }
+
+        /* The drop target is a real button so it is reachable and operable by
+           keyboard (2.1.1) and exposes a button role (4.1.2). */
+        .drop-zone {
+            display: block;
+            width: 100%;
+            padding: 14px;
+            background: var(--bg);
+            border: 2px dashed var(--border);
+            border-radius: var(--radius);
+            text-align: center;
+            color: var(--text);
+            cursor: pointer;
+            font: inherit;
+            transition: background-color 0.2s ease, border-color 0.2s ease;
+        }
+        .drop-zone > span {
+            display: block;
+        }
+        .drop-zone .drop-zone-icon {
+            font-size: 20px;
+        }
+        .drop-zone .drop-zone-hint {
+            font-size: 0.8em;
+            color: var(--text-muted);
+        }
+        .drop-zone.is-dragover {
+            border-color: var(--accent);
+            background: var(--accent-wash);
+        }
+        .drop-zone.is-loaded {
+            border-style: solid;
+            border-color: var(--accent);
+        }
+        /* State is carried by text as well as colour, so colour is never the only
+           channel (1.4.1). */
+        .drop-zone.is-error {
+            border-color: var(--danger);
+            background: var(--danger-wash);
+            color: var(--danger);
+        }
+
+        .stats {
+            font-family: monospace;
+            font-size: 12px;
+            color: var(--text);
+        }
+        .hint {
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+        .error {
+            background: var(--danger-wash);
+            border: 1px solid var(--danger);
+            color: var(--danger);
+            padding: 14px;
+            border-radius: var(--radius);
+            margin-bottom: 12px;
+        }
+        .algorithm-info {
+            margin-top: 8px;
+            border: 1px solid var(--border-decorative);
+            border-radius: var(--radius);
+            background: var(--surface);
+            padding: 10px 14px;
+            font-size: 13px;
+        }
+        .algorithm-info summary {
+            cursor: pointer;
+            font-weight: bold;
+            min-height: 24px;
+            padding: 2px 0;
+        }
+        .algorithm-info p {
+            margin-top: 8px;
+        }
+        .algorithm-info code {
+            background: var(--bg);
+            border: 1px solid var(--border-decorative);
+            padding: 1px 5px;
+            border-radius: 3px;
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            * {
+                transition-duration: 0.01ms !important;
+                animation-duration: 0.01ms !important;
+            }
+        }
+    </style>
+</head>
+<body>
+<main class="container">
+        <header class="page-head">
+            <h1>Tabula Rasa (WebGPU)</h1>
+            <div class="page-actions">
+                <p class="stats" id="stats">FPS: -- | Avg: -- ms | VRAM: -- MB</p>
+                <a class="page-switch" href="safetensor-viewer.html">
+                    <span>Safetensors Viewer</span>
+                    <span aria-hidden="true">&rarr;</span>
+                </a>
+            </div>
+        </header>
+
+        <div id="errorContainer" role="alert"></div>
+
+        <!-- Visual affordance shown only while a file is dragged over the window.
+             Hidden from assistive technology because dragging is pointer-only and
+             the same action is available from the Load mesh file button. -->
+        <div id="globalDropOverlay" aria-hidden="true" style="
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(10, 92, 107, 0.12);
+            border: 4px dashed #0a5c6b;
+            z-index: 9999;
+            pointer-events: none;
+            box-sizing: border-box;
+        ">
+            <div style="
+                position: absolute;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                text-align: center;
+                color: #0a5c6b;
+                font-size: 24px;
+                font-weight: bold;
+            ">
+                <div style="font-size: 64px; margin-bottom: 10px;">&#128230;</div>
+                <div>Drop mesh file to load mesh</div>
+            </div>
+        </div>
+
+        <div class="layout">
+            <!-- Left: what you are looking at, and the controls that choose it. -->
+            <div class="viewport">
+                <section class="panel" aria-labelledby="visualisationHeading">
+                    <div class="panel-head">
+                        <h2 id="visualisationHeading">Noise Field</h2>
+                        <p class="hint">Press <strong>SPACE</strong> to play or pause</p>
+                    </div>
+                    <canvas id="noiseCanvas" width="512" height="512" role="img"
+                            aria-label="Rendered correlated noise over the loaded mesh"></canvas>
+                    <section class="display-inspector" aria-labelledby="displayHeading">
+                        <h3 id="displayHeading">Display</h3>
+                        <div class="display-grid">
+                            <div class="display-controls">
+                                <div class="control-group">
+                                    <label for="outputModeSelect" title="Which buffer to display: the final noise, or a single G-buffer channel for inspection.">Output Mode</label>
+                                    <span class="sr-only" id="outputModeSelectDescription">Which buffer to display: the final noise, or a single G-buffer channel for inspection.</span>
+                                    <select id="outputModeSelect" aria-describedby="outputModeSelectDescription">
+                                        <option value="0">Final Noise</option>
+                                        <option value="3">Footprint (Jacobian det.)</option>
+                                        <option value="9">LOD Level (from footprint)</option>
+                                        <option value="4">Depth Map</option>
+                                        <option value="5">Object ID Map</option>
+                                        <option value="6">Position Map (Object-Space)</option>
+                                        <option value="7">Normals (World-Space)</option>
+                                        <option value="8">Position Map (Camera-Space)</option>
+                                    </select>
+                                </div>
+                                <div class="transport">
+                                    <button type="button" id="playPauseButton" class="icon-button is-playing"
+                                            aria-label="Pause animation"
+                                            title="Start or stop the camera orbit and mesh animation.">
+                                        <svg class="icon icon-pause" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                            <rect x="7" y="5" width="3.5" height="14" rx="1"></rect>
+                                            <rect x="13.5" y="5" width="3.5" height="14" rx="1"></rect>
+                                        </svg>
+                                        <svg class="icon icon-play" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                            <path d="M8 5.5 19 12 8 18.5Z"></path>
+                                        </svg>
+                                    </button>
+                                    <div class="control-group transport-time">
+                                        <div class="control-head">
+                                            <label for="timeSlider" title="Animation time, which drives the camera orbit and any mesh animation.">Time</label>
+                                            <span class="sr-only" id="timeSliderDescription">Animation time, which drives the camera orbit and any mesh animation.</span>
+                                            <button type="button" class="value-display" id="timeValue"
+                                                    aria-label="Edit time, current value 0.00">0.00</button>
+                                        </div>
+                                        <input type="range" id="timeSlider" min="0" max="5" step="0.01" value="0"
+                                               aria-describedby="timeSliderDescription">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="control-group histogram-control">
+                                <label class="checkbox-label" for="showHistogram" title="Plot the distribution of displayed values. Costs a GPU-to-CPU readback every frame.">
+                                    <input type="checkbox" id="showHistogram" checked
+                                           aria-describedby="showHistogramDescription">
+                                    <span>Show histogram <span class="hint">(slower)</span></span>
+                                </label>
+                                <span class="sr-only" id="showHistogramDescription">Plot the distribution of displayed values. Costs a GPU-to-CPU readback every frame.</span>
+                                <div class="histogram-wrap">
+                                    <canvas id="histogramCanvas" width="256" height="128" role="img"
+                                            aria-label="Histogram of noise values with a reference standard normal curve"></canvas>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+                </section>
+            </div>
+
+            <!-- Right: the three groups of settings. -->
+            <div class="controls-region">
+                <section class="panel" aria-labelledby="noiseHeading">
+                    <h2 id="noiseHeading">Noise Controls</h2>
+                    <div class="control-grid">
+                        <div class="control-group span-all">
+                            <label for="fieldTypeSelect" title="How the noise field adapts to the pixel footprint across LOD levels.">Field Type</label>
+                            <span class="sr-only" id="fieldTypeSelectDescription">How the noise field adapts to the pixel footprint across LOD levels.</span>
+                            <select id="fieldTypeSelect" aria-describedby="fieldTypeSelectDescription">
+                                <option value="0">White (fixed resolution)</option>
+                                <option value="2">Adaptive (single LOD level)</option>
+                                <option value="1" selected>Blended Adaptive (trilinear LOD)</option>
+                            </select>
+                        </div>
+                        <div class="control-group">
+                            <label for="rngTypeSelect" title="Threefry matches the JAX reference bit-for-bit; PCG is faster.">RNG Type</label>
+                            <span class="sr-only" id="rngTypeSelectDescription">Threefry matches the JAX reference bit-for-bit; PCG is faster.</span>
+                            <select id="rngTypeSelect" aria-describedby="rngTypeSelectDescription">
+                                <option value="0">Threefry (JAX)</option>
+                                <option value="1" selected>PCG (fast)</option>
+                            </select>
+                        </div>
+                        <div class="control-group">
+                            <label for="seedInput" title="Seed for the noise field. Change it for a different pattern.">Seed</label>
+                            <span class="sr-only" id="seedInputDescription">Seed for the noise field. Change it for a different pattern.</span>
+                            <input type="number" id="seedInput" value="0" aria-describedby="seedInputDescription">
+                        </div>
+                        <div class="control-group span-all">
+                            <label for="estimatorModeSelect" title="Biased reuses the histogram samples; unbiased draws a second independent set.">Estimator Mode</label>
+                            <span class="sr-only" id="estimatorModeSelectDescription">Biased reuses the histogram samples; unbiased draws a second independent set.</span>
+                            <select id="estimatorModeSelect" aria-describedby="estimatorModeSelectDescription">
+                                <option value="0" selected>Biased (N samples)</option>
+                                <option value="1">Unbiased (2N samples)</option>
+                            </select>
+                        </div>
+                        <div class="control-group">
+                            <div class="control-head">
+                                <label for="sampleSlider" title="Monte Carlo samples per pixel. Higher is smoother and slower. Capped at 256.">Samples</label>
+                                <span class="sr-only" id="sampleSliderDescription">Monte Carlo samples per pixel. Higher is smoother and slower. Capped at 256.</span>
+                                <button type="button" class="value-display" id="sampleValue"
+                                        aria-label="Edit sample count, current value 256">256</button>
+                            </div>
+                            <input type="range" id="sampleSlider" min="16" max="256" step="1" value="256"
+                                   aria-describedby="sampleSliderDescription">
+                        </div>
+                        <div class="control-group">
+                            <div class="control-head">
+                                <label for="binCountSlider" title="Bins in the estimator's weighted histogram, which drives the variance correction.">Bin Count</label>
+                                <span class="sr-only" id="binCountSliderDescription">Bins in the estimator's weighted histogram, which drives the variance correction.</span>
+                                <button type="button" class="value-display" id="binCountValue"
+                                        aria-label="Edit bin count, current value 256">256</button>
+                            </div>
+                            <input type="range" id="binCountSlider" min="1" max="256" step="1" value="256"
+                                   aria-describedby="binCountSliderDescription">
+                        </div>
+                        <div class="control-group">
+                            <div class="control-head">
+                                <label for="fieldResolutionSlider" title="Resolution of the isotropic 3D noise field grid.">Field Resolution</label>
+                                <span class="sr-only" id="fieldResolutionSliderDescription">Resolution of the isotropic 3D noise field grid.</span>
+                                <button type="button" class="value-display" id="fieldResolutionValue"
+                                        aria-label="Edit field resolution, current value 512">512</button>
+                            </div>
+                            <input type="range" id="fieldResolutionSlider" min="16" max="2048" step="16" value="512"
+                                   aria-describedby="fieldResolutionSliderDescription">
+                        </div>
+                        <div class="control-group">
+                            <div class="control-head">
+                                <label for="resWidthSlider" title="Render width in pixels.">Width</label>
+                                <span class="sr-only" id="resWidthSliderDescription">Render width in pixels.</span>
+                                <button type="button" class="value-display" id="resWidthValue"
+                                        aria-label="Edit render width, current value 512">512</button>
+                            </div>
+                            <input type="range" id="resWidthSlider" min="64" max="1024" step="64" value="512"
+                                   aria-describedby="resWidthSliderDescription">
+                        </div>
+                        <div class="control-group">
+                            <div class="control-head">
+                                <label for="resHeightSlider" title="Render height in pixels.">Height</label>
+                                <span class="sr-only" id="resHeightSliderDescription">Render height in pixels.</span>
+                                <button type="button" class="value-display" id="resHeightValue"
+                                        aria-label="Edit render height, current value 512">512</button>
+                            </div>
+                            <input type="range" id="resHeightSlider" min="64" max="1024" step="64" value="512"
+                                   aria-describedby="resHeightSliderDescription">
+                        </div>
+                    </div>
+                </section>
+
+                <section class="panel" aria-labelledby="meshHeading">
+                    <h2 id="meshHeading">Mesh &amp; Camera</h2>
+                    <div class="control-grid">
+                        <div class="control-group span-all">
+                            <label for="meshDropZone" title="Load an OBJ, glTF or GLB mesh. glTF skinning and animation are supported.">Load Mesh File</label>
+                            <span class="sr-only" id="meshDropZoneDescription">Load an OBJ, glTF or GLB mesh. glTF skinning and animation are supported.</span>
+                            <button type="button" id="meshDropZone" class="drop-zone"
+                                    aria-describedby="meshDropZoneDescription">
+                                <span class="drop-zone-icon" aria-hidden="true">&#128230;</span>
+                                <span class="drop-zone-label">Choose a file, or drag one here</span>
+                                <span class="drop-zone-hint">OBJ, GLTF, GLB</span>
+                            </button>
+                            <input type="file" id="objFileInput" accept=".obj,.gltf,.glb"
+                                   aria-label="Mesh file" style="display: none;">
+                        </div>
+
+                        <div class="control-group span-all" id="meshStatusGroup" style="display: none;">
+                            <p class="hint">Loaded: <span id="meshStatus">None</span></p>
+                        </div>
+
+                        <div class="control-group span-all" id="animationSelectGroup" style="display: none;">
+                            <label for="animationSelect" title="Which animation clip from the loaded glTF to play.">Animation</label>
+                            <span class="sr-only" id="animationSelectDescription">Which animation clip from the loaded glTF to play.</span>
+                            <select id="animationSelect" aria-describedby="animationSelectDescription">
+                                <option value="-1">None (static pose)</option>
+                            </select>
+                        </div>
+
+                        <div class="control-group span-all" id="animationSpeedGroup" style="display: none;">
+                            <div class="control-head">
+                                <label for="animationSpeedSlider" title="Playback rate multiplier for the selected clip.">Animation Speed</label>
+                                <span class="sr-only" id="animationSpeedSliderDescription">Playback rate multiplier for the selected clip.</span>
+                                <button type="button" class="value-display" id="animationSpeedValue"
+                                        aria-label="Edit animation speed, current value 1.0">1.0</button>
+                            </div>
+                            <input type="range" id="animationSpeedSlider" min="0" max="3" step="0.1" value="1.0"
+                                   aria-describedby="animationSpeedSliderDescription">
+                        </div>
+
+                        <div class="control-group">
+                            <div class="control-head">
+                                <label for="meshYawSlider" title="Camera orbit angle around the mesh.">Yaw (&deg;)</label>
+                                <span class="sr-only" id="meshYawSliderDescription">Camera orbit angle around the mesh.</span>
+                                <button type="button" class="value-display" id="meshYawValue"
+                                        aria-label="Edit camera yaw in degrees, current value 0">0</button>
+                            </div>
+                            <input type="range" id="meshYawSlider" min="-180" max="180" step="1" value="0"
+                                   aria-describedby="meshYawSliderDescription">
+                        </div>
+                        <div class="control-group">
+                            <div class="control-head">
+                                <label for="meshPitchSlider" title="Camera elevation angle above or below the mesh.">Pitch (&deg;)</label>
+                                <span class="sr-only" id="meshPitchSliderDescription">Camera elevation angle above or below the mesh.</span>
+                                <button type="button" class="value-display" id="meshPitchValue"
+                                        aria-label="Edit camera pitch in degrees, current value 0">0</button>
+                            </div>
+                            <input type="range" id="meshPitchSlider" min="-90" max="90" step="1" value="0"
+                                   aria-describedby="meshPitchSliderDescription">
+                        </div>
+                        <div class="control-group">
+                            <div class="control-head">
+                                <label for="meshYawRotationSpeedSlider" title="Degrees per second the camera orbits while the animation runs.">Yaw Speed (&deg;/s)</label>
+                                <span class="sr-only" id="meshYawRotationSpeedSliderDescription">Degrees per second the camera orbits while the animation runs.</span>
+                                <button type="button" class="value-display" id="meshYawRotationSpeedValue"
+                                        aria-label="Edit camera yaw speed in degrees per second, current value 5">5</button>
+                            </div>
+                            <input type="range" id="meshYawRotationSpeedSlider" min="-180" max="180" step="5" value="5"
+                                   aria-describedby="meshYawRotationSpeedSliderDescription">
+                        </div>
+                        <div class="control-group">
+                            <div class="control-head">
+                                <label for="meshScaleSlider" title="Uniform scale applied to the loaded mesh.">Mesh Scale</label>
+                                <span class="sr-only" id="meshScaleSliderDescription">Uniform scale applied to the loaded mesh.</span>
+                                <button type="button" class="value-display" id="meshScaleValue"
+                                        aria-label="Edit mesh scale, current value 1.0">1.0</button>
+                            </div>
+                            <input type="range" id="meshScaleSlider" min="0.1" max="10" step="0.1" value="1.0"
+                                   aria-describedby="meshScaleSliderDescription">
+                        </div>
+                        <div class="control-group">
+                            <label class="checkbox-label" for="centerBackgroundCube" title="Move the background cube faces to the centers of field cells to avoid GPU-dependent boundary artifacts.">
+                                <input type="checkbox" id="centerBackgroundCube" checked
+                                       aria-describedby="centerBackgroundCubeDescription">
+                                <span>Center background between field cells</span>
+                            </label>
+                            <span class="sr-only" id="centerBackgroundCubeDescription">Move the background cube faces to the centers of field cells to avoid GPU-dependent boundary artifacts.</span>
+                        </div>
+                        <div class="control-group span-all">
+                            <div class="control-head">
+                                <label for="meshFovSlider" title="Vertical camera field of view. Lower is a longer lens.">Field of View (&deg;)</label>
+                                <span class="sr-only" id="meshFovSliderDescription">Vertical camera field of view. Lower is a longer lens.</span>
+                                <button type="button" class="value-display" id="meshFovValue"
+                                        aria-label="Edit field of view in degrees, current value 60">60</button>
+                            </div>
+                            <input type="range" id="meshFovSlider" min="10" max="120" step="1" value="60"
+                                   aria-describedby="meshFovSliderDescription">
+                        </div>
+                    </div>
+                </section>
+
+                <section class="panel" aria-labelledby="exportHeading">
+                    <h2 id="exportHeading">Export</h2>
+                    <div class="control-grid">
+                        <div class="control-group">
+                            <label for="exportLengthSelect" title="Duration of the exported sequence.">Length</label>
+                            <span class="sr-only" id="exportLengthSelectDescription">Duration of the exported sequence.</span>
+                            <select id="exportLengthSelect" aria-describedby="exportLengthSelectDescription">
+                                <option value="1">1 second</option>
+                                <option value="2">2 seconds</option>
+                                <option value="3">3 seconds</option>
+                                <option value="4">4 seconds</option>
+                                <option value="5" selected>5 seconds</option>
+                            </select>
+                        </div>
+                        <div class="control-group">
+                            <label for="exportFpsSelect" title="Frames per second of the exported sequence.">FPS</label>
+                            <span class="sr-only" id="exportFpsSelectDescription">Frames per second of the exported sequence.</span>
+                            <select id="exportFpsSelect" aria-describedby="exportFpsSelectDescription">
+                                <option value="10" selected>10 FPS</option>
+                                <option value="12.5">12.5 FPS</option>
+                                <option value="15">15 FPS</option>
+                                <option value="20">20 FPS</option>
+                                <option value="24">24 FPS</option>
+                                <option value="30">30 FPS</option>
+                                <option value="60">60 FPS</option>
+                            </select>
+                        </div>
+                        <div class="control-group span-all">
+                            <label for="batchSeedsInput" title="Export this many sequences, incrementing the seed each time.">Batch Seeds</label>
+                            <span class="sr-only" id="batchSeedsInputDescription">Export this many sequences, incrementing the seed each time.</span>
+                            <input type="number" id="batchSeedsInput" value="1" min="1"
+                                   aria-describedby="batchSeedsInputDescription">
+                        </div>
+                        <div class="control-group">
+                            <button type="button" id="exportNoiseButton" title="Write the 16 noise channels as .safetensors." class="button-primary">
+                                Export Noise
+                            </button>
+                        </div>
+                        <div class="control-group">
+                            <button type="button" id="exportButton" title="Write every channel, including the G-buffer, as .safetensors." class="button-primary">
+                                Export All
+                            </button>
+                        </div>
+                    </div>
+                </section>
+            </div>
+        </div>
+
+        <details class="algorithm-info">
+            <summary>Algorithm: O(N) Histogram Count-Unique</summary>
+            <p>
+                <strong>Raster pass:</strong> Rasterize the mesh into a G-buffer of
+                object-space position and pixel footprint<br>
+                <strong>Noise pass:</strong> One workgroup per pixel, one thread per
+                sample; accumulate field values and build the weighted histogram with
+                <code>atomicAdd</code>, then correct the variance<br>
+                <strong>Tonemap pass:</strong> Map raw values to a displayable range<br>
+                <strong>Blit pass:</strong> Draw the result to the canvas
+            </p>
+        </details>
+    </main>
+
+    <script src="wgsl-preprocessor.js"></script>
+    <script src="obj-loader.js"></script>
+    <script src="gltf-loader.js"></script>
+    <script src="main.js"></script>
+</body>
+</html>

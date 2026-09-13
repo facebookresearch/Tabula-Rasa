@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<!--
+Copyright (c) Meta Platforms, Inc. and affiliates.
+All rights reserved.
+
+This source code is licensed under the license found in the
+LICENSE file in the root directory of this source tree.
+-->
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>RUNNING</title>
+</head>
+<body>
+<pre id="results">Running...</pre>
+<script src="../obj-loader.js"></script>
+<script>
+const results = [];
+
+function assert(condition, message) {
+    if (!condition) {
+        throw new Error(message);
+    }
+}
+
+async function loadText(path) {
+    const response = await fetch(path);
+    assert(response.ok, `failed to load ${path}: ${response.status}`);
+    return response.text();
+}
+
+async function test(name, callback) {
+    try {
+        await callback();
+        results.push(`PASS ${name}`);
+    } catch (error) {
+        results.push(`FAIL ${name}: ${error.stack || error.message}`);
+    }
+}
+
+function extractParamsFields(shader) {
+    const body = shader.match(/struct Params \{([\s\S]*?)\n\}/);
+    assert(body, 'Params struct was not found');
+    return [...body[1].matchAll(/^\s*(\w+):\s*f32,/gm)].map(match => match[1]);
+}
+
+function cameraPosition(yaw, pitch, distance = 3) {
+    const cosPitch = Math.cos(pitch);
+    return [
+        distance * Math.sin(yaw) * cosPitch,
+        distance * Math.sin(pitch),
+        distance * Math.cos(yaw) * cosPitch,
+    ];
+}
+
+function cameraAzimuth(position) {
+    return Math.atan2(position[0], position[2]);
+}
+
+function approx(actual, expected, tolerance = 1e-6) {
+    return Math.abs(actual - expected) <= tolerance;
+}
+
+(async () => {
+    const [index, main, objLoader, common, noise, tonemap, rasterizer] = await Promise.all([
+        loadText('../index.html'),
+        loadText('../main.js'),
+        loadText('../obj-loader.js'),
+        loadText('../shaders/common.wgsl'),
+        loadText('../shaders/noise.wgsl'),
+        loadText('../shaders/tonemap.wgsl'),
+        loadText('../shaders/rasterizer_mesh.wgsl'),
+    ]);
+
+    await test('custom mesh controls expose yaw, pitch, and yaw speed ranges', () => {
+        const document = new DOMParser().parseFromString(index, 'text/html');
+        const expected = [
+            ['meshYawSlider', '-180', '180', '0'],
+            ['meshPitchSlider', '-90', '90', '0'],
+            ['meshYawRotationSpeedSlider', '-180', '180', '5'],
+        ];
+        for (const [id, min, max, value] of expected) {
+            const input = document.getElementById(id);
+            assert(input, `${id} is missing`);
+            assert(input.min === min, `${id} min is ${input.min}`);
+            assert(input.max === max, `${id} max is ${input.max}`);
+            assert(input.value === value, `${id} default is ${input.value}`);
+        }
+        assert(!document.getElementById('meshCameraHeightSlider'), 'camera height control remains');
+
+        // The slider seeds the renderer on load, but the constructor carries its own
+        // default, so the two have to agree or the opening frames orbit at the wrong
+        // rate depending on which one wins.
+        const markupSpeed = document.getElementById('meshYawRotationSpeedSlider').value;
+        const constructorSpeed = main.match(
+            /this\.meshCameraYawRotationSpeed = (-?[\d.]+);/,
+        );
+        assert(constructorSpeed, 'renderer has no yaw speed default');
+        assert(
+            constructorSpeed[1] === markupSpeed,
+            `markup default ${markupSpeed} does not match renderer default ${constructorSpeed[1]}`,
+        );
+
+        // The readout next to the slider is plain text and does not update itself.
+        const readout = document.getElementById('meshYawRotationSpeedValue');
+        assert(readout, 'yaw speed readout is missing');
+        assert(
+            readout.textContent.trim() === markupSpeed,
+            `yaw speed readout shows ${readout.textContent.trim()}, slider is ${markupSpeed}`,
+        );
+    });
+
+    await test('transport controls sit with the visualisation they drive', () => {
+        const document = new DOMParser().parseFromString(index, 'text/html');
+        const panel = document.getElementById('noiseCanvas').closest('.panel');
+        assert(panel, 'noise canvas is not inside a panel');
+        assert(panel.querySelector('#timeSlider'), 'time slider is not beside the noise canvas');
+        assert(panel.querySelector('#playPauseButton'), 'play/pause is not beside the noise canvas');
+
+        // Autoplay needs a control that does not depend on a keyboard (WCAG 2.2.2).
+        const toggle = document.getElementById('playPauseButton');
+        assert(toggle.tagName === 'BUTTON', 'play/pause is not a button');
+
+        // Icon-only, so the accessible name is the only thing carrying the state,
+        // and the icons themselves must stay hidden from assistive technology.
+        assert(toggle.getAttribute('aria-label'), 'play/pause has no accessible name');
+        assert(toggle.querySelector('.icon-play'), 'play icon is missing');
+        assert(toggle.querySelector('.icon-pause'), 'pause icon is missing');
+        for (const icon of toggle.querySelectorAll('svg')) {
+            assert(icon.getAttribute('aria-hidden') === 'true', 'an icon is exposed to assistive tech');
+        }
+        assert(
+            main.includes("playPauseButton.setAttribute('aria-label', animating ? 'Pause animation' : 'Play animation')"),
+            'the accessible name does not follow the state',
+        );
+        assert(main.includes('function setAnimating('), 'animation has no single entry point');
+        assert(
+            main.includes("window.matchMedia('(prefers-reduced-motion: reduce)')"),
+            'autoplay ignores prefers-reduced-motion',
+        );
+    });
+
+    await test('all numeric readout buttons provide an accessible editor', () => {
+        const document = new DOMParser().parseFromString(index, 'text/html');
+        const readouts = new Map([
+            ['timeValue', 'timeSlider'],
+            ['sampleValue', 'sampleSlider'],
+            ['binCountValue', 'binCountSlider'],
+            ['fieldResolutionValue', 'fieldResolutionSlider'],
+            ['resWidthValue', 'resWidthSlider'],
+            ['resHeightValue', 'resHeightSlider'],
+            ['animationSpeedValue', 'animationSpeedSlider'],
+            ['meshYawValue', 'meshYawSlider'],
+            ['meshPitchValue', 'meshPitchSlider'],
+            ['meshYawRotationSpeedValue', 'meshYawRotationSpeedSlider'],
+            ['meshScaleValue', 'meshScaleSlider'],
+            ['meshFovValue', 'meshFovSlider'],
+        ]);
+
+        const buttons = [...document.querySelectorAll('.value-display')];
+        assert(buttons.length === readouts.size, `expected ${readouts.size} readouts, got ${buttons.length}`);
+        for (const [valueId, sliderId] of readouts) {
+            const button = document.getElementById(valueId);
+            assert(button?.tagName === 'BUTTON', `${valueId} is not a button`);
+            assert(button.type === 'button', `${valueId} can submit a form`);
+            assert(document.getElementById(sliderId), `${sliderId} is missing`);
+            assert(button.getAttribute('aria-label')?.startsWith('Edit '), `${valueId} has no edit action name`);
+            assert(button.getAttribute('aria-label')?.includes(button.textContent.trim()), `${valueId} name omits its current value`);
+            assert(main.includes(`makeEditable(${valueId}, ${sliderId},`), `${valueId} is not editable`);
+        }
+
+        assert(main.includes("input.setAttribute('aria-label'"), 'temporary number input has no accessible name');
+        assert(main.includes('decimalPlaces'), 'editor does not support display precision');
+        assert(main.includes('finishEdit({ commit: true, restoreFocus: true })'), 'Enter does not restore focus');
+        assert(main.includes('finishEdit({ commit: false, restoreFocus: true })'), 'Escape does not restore focus');
+        assert(main.includes('finishEdit({ commit: true, restoreFocus: false })'), 'blur can steal focus');
+        assert(main.includes('queueMicrotask(() => valueSpan.focus({ preventScroll: true }))'), 'keyboard completion does not restore focus safely');
+        assert(main.includes('scheduleSaveSettings();'), 'successful typed edits are not saved');
+        assert(main.includes('if (animating) setAnimating(false);'), 'editing Time does not pause animation');
+        assert(main.includes('{ min: 1, max: 256, step: 1 }'), 'Samples no longer accepts a typed value of 1');
+        assert(main.includes('{ min: 64, max: 1024, step: 1 }'), 'render dimensions no longer accept individual pixels');
+        assert(main.includes('{ min: 16, max: 2048, step: 1 }'), 'field resolution no longer accepts individual cells');
+        assert(main.includes('{ min: -180, max: 180, step: 1 }'), 'yaw speed no longer accepts individual degrees per second');
+    });
+
+    await test('global Space shortcut ignores interactive targets', () => {
+        assert(main.includes("event.composedPath()"), 'Space guard ignores the composed event path');
+        for (const selector of ['summary', 'a[href]', 'area[href]', 'audio[controls]', 'video[controls]']) {
+            assert(main.includes(selector), `Space guard does not protect ${selector}`);
+        }
+        assert(main.includes('target.isContentEditable'), 'Space guard does not protect editable content');
+        assert(main.includes('interactiveRoles'), 'Space guard does not protect ARIA widgets');
+        assert(main.includes('e.defaultPrevented'), 'Space shortcut ignores prior event handling');
+        assert(main.includes('e.repeat'), 'Space shortcut toggles repeatedly while held');
+        assert(main.includes('e.altKey || e.ctrlKey || e.metaKey || e.shiftKey'), 'Space shortcut ignores modifiers');
+        assert(main.includes("e.code !== 'Space'"), 'Space shortcut key check is missing');
+        assert(main.includes('eventTargetsInteractiveElement(e)'), 'Space handler bypasses its target guard');
+        assert(/e\.preventDefault\(\);\s*setAnimating\(!animating\);/.test(main), 'ordinary Space no longer toggles playback');
+    });
+
+    await test('display controls form a compact inspector inside the visualisation panel', () => {
+        const document = new DOMParser().parseFromString(index, 'text/html');
+        const viewport = document.querySelector('.viewport');
+        const visualPanel = document.getElementById('noiseCanvas').closest('.panel');
+        const inspector = document.querySelector('.display-inspector');
+        const panelChildren = [...viewport.children].filter((element) => element.classList.contains('panel'));
+
+        assert(panelChildren.length === 1, `viewport has ${panelChildren.length} direct panels`);
+        assert(inspector && visualPanel.contains(inspector), 'Display inspector is outside the visualisation panel');
+        assert(!inspector.classList.contains('panel'), 'Display inspector is nested as another card');
+        assert(!visualPanel.querySelector('.panel'), 'visualisation panel contains a nested panel');
+        assert(inspector.getAttribute('aria-labelledby') === 'displayHeading', 'Display inspector is not labelled');
+        assert(inspector.querySelector('#displayHeading')?.tagName === 'H3', 'Display heading hierarchy is incorrect');
+
+        for (const id of [
+            'outputModeSelect',
+            'showHistogram',
+            'histogramCanvas',
+            'playPauseButton',
+            'timeSlider',
+        ]) {
+            assert(document.getElementById(id).closest('.panel') === visualPanel, `${id} is outside the visualisation panel`);
+        }
+
+        const histogram = document.getElementById('histogramCanvas');
+        const histogramWrap = histogram.parentElement;
+        assert(histogramWrap.classList.contains('histogram-wrap'), 'histogram has no dedicated wrapper');
+        assert(!histogramWrap.contains(document.getElementById('showHistogram')), 'histogram wrapper contains its toggle');
+        assert(main.includes('histogramCanvas.parentElement.style.display'), 'histogram visibility no longer targets its wrapper');
+
+        assert(index.includes('grid-template-columns: repeat(auto-fit, minmax(232px, 1fr));'), 'desktop controls do not fit three cards');
+        assert(index.includes('grid-template-columns: minmax(0, 1fr) 192px;'), 'Display inspector is not compact on desktop');
+        assert(index.includes('@media (min-width: 901px)'), 'desktop visualisation sizing rule is missing');
+        assert(index.includes('max-height: clamp(240px, calc(100svh - 384px), 512px);'), 'canvas is not viewport-height aware');
+        const noiseCanvasRule = index.match(/#noiseCanvas\s*\{([^}]*)\}/);
+        assert(noiseCanvasRule, 'noise canvas CSS rule is missing');
+        assert(noiseCanvasRule[1].includes('width: auto'), 'noise canvas width is forced');
+        assert(noiseCanvasRule[1].includes('height: auto'), 'noise canvas height is forced');
+        assert(!noiseCanvasRule[1].includes('aspect-ratio'), 'noise canvas is forced square');
+    });
+
+    await test('renderer computes unwrapped effective yaw from export-aware time', () => {
+        assert(
+            main.includes('const cameraYaw = (this.meshCameraYaw + effectiveTime * this.meshCameraYawRotationSpeed) * Math.PI / 180.0;'),
+            'effective yaw formula is missing',
+        );
+        assert(main.includes('effectiveTime = this.exportFrame / this.exportFps;'), 'export time is not reused');
+        assert(main.includes('const cameraPitch = -this.meshCameraPitch * Math.PI / 180.0;'), 'inverted camera pitch conversion is missing');
+        assert(!main.includes('meshCameraHeight'), 'camera height renderer state remains');
+    });
+
+    await test('field resolution is a single isotropic control', () => {
+        const document = new DOMParser().parseFromString(index, 'text/html');
+        const slider = document.getElementById('fieldResolutionSlider');
+        assert(slider, 'field resolution slider is missing');
+        assert(slider.value === '512', `field resolution default is ${slider.value}`);
+        assert(!document.getElementById('fieldResXSlider'), 'legacy Field Res X control remains');
+        assert(!document.getElementById('fieldResYSlider'), 'ineffective Field Res Y control remains');
+        assert(!main.includes('this.fieldResolutionY'), 'ineffective fieldResolutionY renderer state remains');
+        assert(main.includes('settings.fieldResolution = settings.fieldResolutionX;'), 'saved Field Res X values are not migrated');
+    });
+
+    await test('control tooltips live on their visible labels', () => {
+        const document = new DOMParser().parseFromString(index, 'text/html');
+        const tooltips = new Map([
+            ['timeSlider', 'Animation time, which drives the camera orbit and any mesh animation.'],
+            ['outputModeSelect', 'Which buffer to display: the final noise, or a single G-buffer channel for inspection.'],
+            ['showHistogram', 'Plot the distribution of displayed values. Costs a GPU-to-CPU readback every frame.'],
+            ['fieldTypeSelect', 'How the noise field adapts to the pixel footprint across LOD levels.'],
+            ['rngTypeSelect', 'Threefry matches the JAX reference bit-for-bit; PCG is faster.'],
+            ['seedInput', 'Seed for the noise field. Change it for a different pattern.'],
+            ['estimatorModeSelect', 'Biased reuses the histogram samples; unbiased draws a second independent set.'],
+            ['sampleSlider', 'Monte Carlo samples per pixel. Higher is smoother and slower. Capped at 256.'],
+            ['binCountSlider', "Bins in the estimator's weighted histogram, which drives the variance correction."],
+            ['fieldResolutionSlider', 'Resolution of the isotropic 3D noise field grid.'],
+            ['resWidthSlider', 'Render width in pixels.'],
+            ['resHeightSlider', 'Render height in pixels.'],
+            ['meshDropZone', 'Load an OBJ, glTF or GLB mesh. glTF skinning and animation are supported.'],
+            ['animationSelect', 'Which animation clip from the loaded glTF to play.'],
+            ['animationSpeedSlider', 'Playback rate multiplier for the selected clip.'],
+            ['meshYawSlider', 'Camera orbit angle around the mesh.'],
+            ['meshPitchSlider', 'Camera elevation angle above or below the mesh.'],
+            ['meshYawRotationSpeedSlider', 'Degrees per second the camera orbits while the animation runs.'],
+            ['meshScaleSlider', 'Uniform scale applied to the loaded mesh.'],
+            ['centerBackgroundCube', 'Move the background cube faces to the centers of field cells to avoid GPU-dependent boundary artifacts.'],
+            ['meshFovSlider', 'Vertical camera field of view. Lower is a longer lens.'],
+            ['exportLengthSelect', 'Duration of the exported sequence.'],
+            ['exportFpsSelect', 'Frames per second of the exported sequence.'],
+            ['batchSeedsInput', 'Export this many sequences, incrementing the seed each time.'],
+        ]);
+
+        const idCounts = new Map();
+        for (const element of document.querySelectorAll('[id]')) {
+            idCounts.set(element.id, (idCounts.get(element.id) || 0) + 1);
+        }
+
+        const titledLabels = [...document.querySelectorAll('label[for][title]')];
+        assert(titledLabels.length === tooltips.size, `expected ${tooltips.size} titled labels, got ${titledLabels.length}`);
+        const expectedControlIds = new Set(tooltips.keys());
+        for (const label of titledLabels) {
+            assert(expectedControlIds.has(label.htmlFor), `unexpected titled label for ${label.htmlFor}`);
+        }
+
+        for (const [id, tooltip] of tooltips) {
+            const control = document.getElementById(id);
+            const label = document.querySelector(`label[for="${id}"]`);
+            const descriptionId = `${id}Description`;
+            const description = document.getElementById(descriptionId);
+            assert(control, `${id} is missing`);
+            assert(label, `${id} has no visible label`);
+            assert(label.title === tooltip, `${id} tooltip is not on its label`);
+            assert(!control.hasAttribute('title'), `${id} still owns its tooltip`);
+            assert(control.getAttribute('aria-describedby') === descriptionId, `${id} has the wrong description reference`);
+            assert(idCounts.get(descriptionId) === 1, `${descriptionId} is missing or duplicated`);
+            assert(description?.classList.contains('sr-only'), `${descriptionId} is not visually hidden`);
+            assert(!label.contains(description), `${descriptionId} is part of the accessible name`);
+            assert(description?.textContent.trim() === tooltip, `${descriptionId} does not match its tooltip`);
+        }
+
+        const describedControls = [...document.querySelectorAll('[aria-describedby]')];
+        assert(describedControls.length === tooltips.size, `expected ${tooltips.size} described controls, got ${describedControls.length}`);
+        for (const control of describedControls) {
+            const references = control.getAttribute('aria-describedby').trim().split(/\s+/);
+            assert(references.length === 1, `${control.id} has an unexpected description list`);
+            assert(idCounts.get(references[0]) === 1, `${control.id} references missing or duplicate ${references[0]}`);
+        }
+
+        const srOnlyRule = index.match(/\.sr-only\s*\{([^}]*)\}/);
+        assert(srOnlyRule, 'screen-reader-only styling is missing');
+        assert(!/display\s*:\s*none|visibility\s*:\s*hidden/.test(srOnlyRule[1]), 'descriptions are hidden from assistive technology');
+
+        for (const id of ['playPauseButton', 'exportNoiseButton', 'exportButton']) {
+            assert(document.getElementById(id)?.title, `${id} lost its action tooltip`);
+        }
+        assert(main.includes("valueSpan.title = 'Click to edit';"), 'editable readouts lost their action tooltip');
+    });
+
+    await test('header button links forward to the safetensors viewer', () => {
+        const document = new DOMParser().parseFromString(index, 'text/html');
+        const pageHead = document.querySelector('.page-head');
+        const viewerLink = pageHead.querySelector('a[href="safetensor-viewer.html"]');
+        assert(viewerLink, 'page header has no safetensors viewer link');
+        assert(viewerLink.classList.contains('page-switch'), 'viewer link is not styled as the page switcher');
+        assert(viewerLink.textContent.includes('Safetensors Viewer'), 'viewer link text changed');
+        assert(viewerLink.querySelector('[aria-hidden="true"]')?.textContent === '→', 'viewer link has no forward arrow');
+        const exportPanel = document.getElementById('exportButton').closest('.panel');
+        assert(!exportPanel.querySelector('a[href="safetensor-viewer.html"]'), 'viewer link still appears in the Export panel');
+    });
+
+    await test('conservative dead-code cleanup preserves active rendering paths', () => {
+        assert(!main.includes('function normalize('), 'unused normalize helper remains');
+        assert(!main.includes('function cross('), 'unused cross helper remains');
+        assert(!main.includes('this.animationTime'), 'unused animationTime state remains');
+        assert(!main.includes('this.meshVertexBuffer'), 'unbound mesh vertex storage buffer remains');
+        assert(!main.includes('this.meshNormalBuffer'), 'unbound mesh normal storage buffer remains');
+        assert(!main.includes('const flipY ='), 'unused export flipY helper remains');
+        assert(main.includes('this.customMeshRasterVertexBuffer'), 'active static raster buffer was removed');
+        assert(main.includes('this.skinnedMeshRasterVertexBuffer'), 'active skinned raster buffer was removed');
+        assert(!index.includes('id="customMeshControls"'), 'unused custom mesh panel ID remains');
+        assert(!index.includes('visualisation-panel'), 'unused visualisation-panel class remains');
+        assert(!rasterizer.includes('@builtin(instance_index)'), 'unused mesh instance input remains');
+        assert(!rasterizer.includes('outputObjectId'), 'dead object-ID rewrite remains');
+        assert(!rasterizer.includes('input.objectId < -2.5'), 'unreachable object-ID branch remains');
+        assert(main.includes('window.mcRenderer = renderer;'), 'renderer debugging API was removed');
+        assert(!main.includes("sourceCanvas.getContext('2d'"), 'unreachable direct 2D canvas path remains');
+        assert(main.includes("const tempCanvas = document.createElement('canvas');"), 'temporary histogram canvas was removed');
+        assert(main.includes('tempCtx.drawImage(sourceCanvas, 0, 0);'), 'WebGPU histogram copy was removed');
+
+        assert(!noise.includes('value16ToRgb'), 'unused Value16 RGB conversion remains');
+        assert(!noise.includes('hammersley5D'), 'unused Hammersley dimensions remain');
+        assert(!noise.includes('globalId'), 'unused global invocation ID remains');
+        assert(noise.includes('fn hammersley2D('), '2D Hammersley sampling is missing');
+        assert(noise.includes('index / numSamples'), 'Hammersley X dimension changed');
+        assert(noise.includes('vanDerCorput(idx, 2.0)'), 'Hammersley Y dimension changed');
+        for (const base of ['3.0', '5.0', '7.0']) {
+            assert(!noise.includes(`vanDerCorput(idx, ${base})`), `unused base-${base} sample remains`);
+        }
+    });
+
+    await test('mesh rasterization omits unused UV vertex data', () => {
+        assert(!main.includes('const uvs = []'), 'background cube still allocates UVs');
+        assert(!main.includes('cubeMesh.uvs'), 'background cube still uploads UVs');
+        assert(main.includes('new Float32Array(vertexCount * 6)'), 'static mesh is not packed as position and normal');
+        assert(main.includes('new Float32Array(this.cubeMesh.vertexCount * 6)'), 'background cube is not packed as position and normal');
+        assert(main.includes('const bytesPerVertex = 44;'), 'skinned vertex stride is not compact');
+        assert(main.includes('arrayStride: 6 * 4'), 'static vertex layout is not 24 bytes');
+        assert(main.includes('arrayStride: 44'), 'skinned vertex layout is not 44 bytes');
+        assert(
+            main.includes("{ shaderLocation: 3, offset: 24,     format: 'uint8x4' }"),
+            'joint attribute does not match the compact buffer',
+        );
+        assert(
+            main.includes("{ shaderLocation: 4, offset: 28,     format: 'float32x4' }"),
+            'weight attribute does not match the compact buffer',
+        );
+
+        assert(!objLoader.includes('textureCoords'), 'OBJ loader still collects texture coordinates');
+        assert(!objLoader.includes("type === 'vt'"), 'OBJ loader still parses texture coordinates');
+        assert(!objLoader.includes('vt:'), 'OBJ faces still retain texture-coordinate indices');
+        assert(objLoader.includes("parts[i].split('/')"), 'OBJ slash-delimited face parsing was removed');
+        const parsedObj = parseOBJ([
+            'v 0 0 0',
+            'v 1 0 0',
+            'v 0 1 0',
+            'vt 0 0',
+            'vt 1 0',
+            'vt 0 1',
+            'vn 0 0 1',
+            'f 1/1/1 2/2/1 3/3/1',
+        ].join('\n'));
+        assert(parsedObj.triangleCount === 1, 'OBJ v/vt/vn faces no longer parse');
+        assert(parsedObj.vertices.length === 9, 'OBJ v/vt/vn geometry changed');
+
+        assert(!rasterizer.includes('uv: vec2<f32>'), 'mesh shader still declares a UV attribute');
+        assert(!rasterizer.includes('output.uv'), 'mesh shader still forwards UVs');
+        assert(rasterizer.includes('@location(3) joints: vec4<u32>'), 'joint shader location changed');
+        assert(rasterizer.includes('@location(4) weights: vec4<f32>'), 'weight shader location changed');
+        assert(rasterizer.includes('@location(4) @interpolate(flat) objectId: f32'), 'object ID shader location changed');
+    });
+
+    await test('export plumbing keeps timing and naming without dead arguments', () => {
+        assert(!main.includes('const timeStep = 1.0 / fps'), 'unused export time step remains');
+        assert(
+            !/exportToSafetensorsStreaming\(\s*numFrames,\s*timeStep/.test(main),
+            'streaming export still accepts the dead time step',
+        );
+        assert(
+            !/exportNoiseToSafetensors\([^)]*filename/.test(main),
+            'noise export still accepts an unused filename',
+        );
+        assert(
+            !/exportToSafetensorsInternal\([^)]*filename/.test(main),
+            'internal export still accepts an unused filename',
+        );
+        assert(
+            (main.match(/effectiveTime = frame \/ fps;/g) || []).length === 2,
+            'export paths no longer derive time from frame and FPS',
+        );
+        assert(main.includes('dirHandle.getFileHandle(filename, { create: true })'), 'directory export lost its filename');
+        assert(main.includes('a.download = `${baseFilename}${seedSuffix}.safetensors`;'), 'download export lost its filename');
+    });
+
+    await test('all shader Params declarations agree on the 16-float ABI', () => {
+        const commonFields = extractParamsFields(common);
+        assert(commonFields.length === 16, `expected 16 fields, got ${commonFields.length}`);
+        assert(commonFields.length % 4 === 0, 'uniform structs must be a multiple of 16 bytes');
+        assert(commonFields[15] === 'centerBackgroundCube', `final Params slot is ${commonFields[15]}`);
+        assert(!commonFields.includes('meshPitch'), 'camera pitch leaked into shader parameters');
+        assert(!commonFields.includes('warpMode'), 'the removed warp mode selector remains');
+        assert(JSON.stringify(extractParamsFields(noise)) === JSON.stringify(commonFields), 'noise Params differ');
+        assert(JSON.stringify(extractParamsFields(tonemap)) === JSON.stringify(commonFields), 'tonemap Params differ');
+        assert(/size:\s*64,\s*\/\/ 16 floats/.test(main), 'uniform buffer is not 64 bytes');
+    });
+
+    await test('the params upload packs fields in the shader struct order', () => {
+        // A mismatch here is silent at runtime: every shader would read the wrong
+        // value out of the uniform, so assert the two orderings line up.
+        const fields = extractParamsFields(common);
+        const array = main.match(/const paramsData = new Float32Array\(\[([\s\S]*?)\n\s+\]\);/);
+        assert(array, 'params upload array not found');
+        const entries = array[1]
+            .split('\n')
+            .map(line => line.split('//')[0].trim().replace(/,$/, ''))
+            .filter(Boolean);
+        assert(
+            entries.length === fields.length,
+            `struct has ${fields.length} fields but the upload writes ${entries.length}`,
+        );
+        // Each entry should mention its field name, allowing for the documented
+        // renames (seed <- fieldSeed, meshNorm* <- normalization.*).
+        const alias = {
+            seed: 'fieldSeed',
+            meshNormCenterX: 'normalization.centerX',
+            meshNormCenterY: 'normalization.centerY',
+            meshNormCenterZ: 'normalization.centerZ',
+            meshNormScale: 'normalization.scale',
+        };
+        fields.forEach((field, i) => {
+            const expected = alias[field] || field;
+            assert(
+                entries[i].includes(expected),
+                `slot ${i} is "${field}" in the shader but "${entries[i]}" in the upload`,
+            );
+        });
+    });
+
+    await test('background cube centering is exposed and enabled by default', () => {
+        const document = new DOMParser().parseFromString(index, 'text/html');
+        const toggle = document.getElementById('centerBackgroundCube');
+        assert(toggle, 'background centering toggle is missing');
+        assert(toggle.type === 'checkbox', 'background centering control is not a checkbox');
+        assert(toggle.checked, 'background centering is not enabled by default');
+        assert(main.includes('this.centerBackgroundCube = true;'), 'renderer default is not enabled');
+        assert(main.includes("centerBackgroundCubeCheckbox.addEventListener('change'"), 'toggle is not wired to renderer state');
+        assert(rasterizer.includes('let centeredGridCoord = floor(faceGridCoord) + 0.5;'), 'background face is not centered in its field cell');
+        assert(rasterizer.includes('output.objectSpacePosition = worldPos;'), 'centered geometry and noise coordinates differ');
+
+        const baseHalfSize = 10;
+        for (const fieldRes of [1, 2, 15, 16, 511, 512]) {
+            const faceGridCoord = (baseHalfSize + 1) * 0.5 * fieldRes;
+            const centeredGridCoord = Math.floor(faceGridCoord) + 0.5;
+            const centeredHalfSize = centeredGridCoord * 2 / fieldRes - 1;
+            const positiveGrid = (centeredHalfSize + 1) * 0.5 * fieldRes;
+            const negativeGrid = (-centeredHalfSize + 1) * 0.5 * fieldRes;
+            assert(approx(positiveGrid % 1, 0.5), `positive face is not centered at resolution ${fieldRes}`);
+            assert(approx((negativeGrid % 1 + 1) % 1, 0.5), `negative face is not centered at resolution ${fieldRes}`);
+        }
+    });
+
+    await test('only the built-in cube geometry receives the epsilon scale', () => {
+        const page = new DOMParser().parseFromString(index, 'text/html');
+        assert(
+            main.includes('const DEFAULT_MESH_GEOMETRY_SCALE = 1.0001;'),
+            'default cube geometry epsilon changed',
+        );
+        assert(main.includes('this.meshScale = 1.0;'), 'renderer scale no longer starts at its exact UI value');
+        assert(!main.includes('applyMeshScaleEpsilon'), 'epsilon still affects mesh scale controls');
+        assert(main.includes('mesh.vertices[i] *= geometryScale;'), 'geometry scale is not applied before GPU upload');
+        assert(
+            main.includes('{ geometryScale: DEFAULT_MESH_GEOMETRY_SCALE }'),
+            'default cube load does not request the geometry epsilon',
+        );
+        assert(
+            (main.match(/geometryScale:/g) || []).length === 1,
+            'geometry epsilon is applied outside the default cube load',
+        );
+        assert(Number(page.getElementById('meshScaleSlider')?.value) === 1, 'mesh scale slider does not start at its original size');
+        assert(page.getElementById('meshScaleValue')?.textContent.trim() === '1.0', 'mesh scale readout does not start at its original size');
+
+        const sourceMatch = main.match(/const DEFAULT_MESH_OBJ = `([\s\S]*?)`;/);
+        assert(sourceMatch, 'default cube OBJ source is missing');
+        const mesh = parseOBJ(sourceMatch[1]);
+        for (let i = 0; i < mesh.vertices.length; i++) {
+            assert(approx(Math.abs(mesh.vertices[i]), 0.5), 'default cube geometry remains rotated');
+        }
+        for (let i = 0; i < mesh.normals.length; i += 3) {
+            const nonzeroComponents = mesh.normals
+                .slice(i, i + 3)
+                .filter((value) => Math.abs(value) > 1e-5);
+            assert(nonzeroComponents.length === 1, 'default cube face is not axis-aligned');
+        }
+    });
+
+    await test('camera yaw stays independent while mesh geometry remains unchanged', () => {
+        const yaw = Math.PI / 3;
+        const lowPitch = cameraPosition(yaw, -Math.PI / 4);
+        const highPitch = cameraPosition(yaw, Math.PI / 4);
+        assert(approx(cameraAzimuth(lowPitch), yaw), 'negative pitch changed camera yaw');
+        assert(approx(cameraAzimuth(highPitch), yaw), 'positive pitch changed camera yaw');
+        assert(rasterizer.includes('output.worldPosition = normalizedPos * meshScale;'), 'skinned mesh receives camera rotation');
+        assert(rasterizer.includes('output.worldPosition = input.position * meshScale;'), 'static mesh receives camera rotation');
+        assert(!rasterizer.includes('params.meshYaw'), 'mesh shader still consumes camera yaw');
+        assert(!rasterizer.includes('params.meshPitch'), 'mesh shader still consumes camera pitch');
+    });
+
+    await test('the G-buffer carries a real world-space normal', () => {
+        // The footprint target has two spare channels. They used to hold dPdx/dPdy
+        // magnitudes while the noise pass read them as normal XY, so the Normals view
+        // and the exported `normal` tensor were derivative magnitudes.
+        assert(rasterizer.includes('output.footprint = vec4<f32>(footprint, input.objectId, n.x, n.y);'), 'footprint target does not pack the object ID and normal');
+        assert(rasterizer.includes('let n = normalize(input.worldNormal);'), 'normal is not normalized before packing');
+        assert(!rasterizer.includes('dPdxMag'), 'derivative magnitudes still occupy the normal slots');
+        assert(!index.includes('Derivatives (dP/dx, dP/dy)'), 'the derivatives option remains in the UI');
+    });
+
+    document.getElementById('results').textContent = results.join('\n');
+    document.title = results.some(line => line.startsWith('FAIL')) ? 'FAIL' : 'PASS';
+})();
+</script>
+</body>
+</html>

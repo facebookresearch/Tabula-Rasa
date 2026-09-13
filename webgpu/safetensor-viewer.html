@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<!--
+Copyright (c) Meta Platforms, Inc. and affiliates.
+All rights reserved.
+
+This source code is licensed under the license found in the
+LICENSE file in the root directory of this source tree.
+-->
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light">
+    <title>Safetensors Viewer - Tabula Rasa</title>
+    <style>
+        /* Keep these tokens aligned with the Noise page. Text remains black and
+           teal is reserved for interactive state and focus. */
+        :root {
+            --bg: #ffffff;
+            --surface: #f4f6f8;
+            --text: #000000;
+            --text-muted: #595959;
+            --accent: #0a5c6b;
+            --accent-wash: #e3eef1;
+            --border: #767676;
+            --border-decorative: #d0d7de;
+            --danger: #a4161a;
+            --danger-wash: #fdeaea;
+            --radius: 8px;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            padding: 16px;
+            min-height: 100vh;
+            background: var(--bg);
+            color: var(--text);
+            font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.4;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        h1,
+        h2,
+        h3,
+        p,
+        dl,
+        dd {
+            margin-top: 0;
+        }
+
+        h1 {
+            margin-bottom: 2px;
+            font-size: 1.5rem;
+        }
+
+        h2 {
+            margin-bottom: 10px;
+            font-size: 1rem;
+        }
+
+        h3 {
+            margin-bottom: 8px;
+            font-size: 0.9rem;
+        }
+
+        .page-head,
+        .panel-head,
+        .control-head,
+        .transport-row,
+        .scale-row,
+        .pixel-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+        }
+
+        .page-head {
+            align-items: flex-start;
+            flex-wrap: wrap;
+            margin-bottom: 12px;
+        }
+
+        .page-subtitle,
+        .hint,
+        .status-text {
+            color: var(--text-muted);
+            font-size: 12px;
+        }
+
+        .page-subtitle {
+            margin-bottom: 0;
+        }
+
+        .page-actions {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+            gap: 12px;
+        }
+
+        a {
+            color: var(--accent);
+            font-weight: 600;
+            text-underline-offset: 3px;
+        }
+
+        a:hover {
+            text-decoration-thickness: 2px;
+        }
+
+        .page-switch {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            min-height: 34px;
+            margin-left: auto;
+            padding: 5px 10px;
+            background: var(--bg);
+            color: var(--accent);
+            border: 1px solid var(--accent);
+            border-radius: 4px;
+            font-weight: 700;
+            text-decoration: none;
+        }
+
+        .page-switch:hover {
+            background: var(--accent-wash);
+            text-decoration: none;
+        }
+
+        a:focus-visible,
+        button:focus-visible,
+        select:focus-visible,
+        input:focus-visible {
+            outline: 3px solid var(--accent);
+            outline-offset: 2px;
+        }
+
+        .sr-only {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border: 0;
+        }
+
+        .layout {
+            display: grid;
+            grid-template-columns: minmax(0, 620px) minmax(0, 1fr);
+            gap: 16px;
+            align-items: start;
+        }
+
+        .controls-region {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 16px;
+            align-content: start;
+        }
+
+        .panel {
+            min-width: 0;
+            padding: 14px;
+            background: var(--surface);
+            border: 1px solid var(--border-decorative);
+            border-radius: var(--radius);
+        }
+
+        .preview-panel {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .control-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 10px 14px;
+        }
+
+        .control-grid .span-all {
+            grid-column: 1 / -1;
+        }
+
+        .control-group {
+            min-width: 0;
+        }
+
+        .control-group > label,
+        .control-head > label {
+            display: block;
+            margin-bottom: 4px;
+        }
+
+        .control-head > label {
+            margin-bottom: 0;
+        }
+
+        select,
+        input[type="number"] {
+            width: 100%;
+            padding: 5px;
+            background: var(--bg);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            font: inherit;
+        }
+
+        input[type="range"] {
+            width: 100%;
+            accent-color: var(--accent);
+        }
+
+        button {
+            min-height: 36px;
+            padding: 7px 10px;
+            background: var(--bg);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            cursor: pointer;
+            font: inherit;
+        }
+
+        button:hover:not(:disabled) {
+            background: var(--accent-wash);
+            border-color: var(--accent);
+        }
+
+        button:disabled,
+        select:disabled,
+        input:disabled {
+            cursor: not-allowed;
+            opacity: 0.55;
+        }
+
+        .icon-button {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 36px;
+            height: 36px;
+            min-height: 36px;
+            padding: 0;
+        }
+
+        .icon-button .icon {
+            width: 20px;
+            height: 20px;
+            fill: currentColor;
+        }
+
+        .icon-button .icon-pause {
+            display: none;
+        }
+
+        .icon-button.is-playing .icon-pause {
+            display: block;
+        }
+
+        .icon-button.is-playing .icon-play {
+            display: none;
+        }
+
+        .drop-zone {
+            width: 100%;
+            min-height: 118px;
+            display: grid;
+            place-content: center;
+            gap: 5px;
+            padding: 16px;
+            border: 2px dashed var(--border);
+            text-align: center;
+        }
+
+        .drop-zone.dragover {
+            background: var(--accent-wash);
+            border-color: var(--accent);
+        }
+
+        .drop-zone-label {
+            font-weight: 700;
+        }
+
+        .drop-zone-hint {
+            color: var(--text-muted);
+            font-size: 12px;
+        }
+
+        .canvas-stage {
+            min-height: 280px;
+            display: grid;
+            place-items: center;
+            position: relative;
+            overflow: hidden;
+            background: #111111;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+        }
+
+        #previewCanvas {
+            display: block;
+            width: auto;
+            height: auto;
+            max-width: 100%;
+            image-rendering: pixelated;
+        }
+
+        .empty-state {
+            max-width: 330px;
+            padding: 28px;
+            color: #ffffff;
+            text-align: center;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+
+        .display-inspector {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid var(--border-decorative);
+        }
+
+        .transport-row {
+            align-items: end;
+            margin-bottom: 10px;
+        }
+
+        .transport-buttons {
+            display: flex;
+            gap: 6px;
+        }
+
+        .frame-control {
+            flex: 1;
+            min-width: 150px;
+        }
+
+        output,
+        .mono {
+            font-family: Consolas, "Courier New", monospace;
+        }
+
+        .scale-row {
+            margin-top: 8px;
+            font-size: 12px;
+        }
+
+        .scale-row[hidden] {
+            display: none !important;
+        }
+
+        .scale-bar {
+            flex: 1;
+            height: 16px;
+            background: linear-gradient(to right, #000000, #ffffff);
+            border: 1px solid var(--border);
+            border-radius: 3px;
+        }
+
+        .pixel-row {
+            margin-top: 8px;
+            justify-content: flex-start;
+            color: var(--text-muted);
+            font-size: 12px;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .stat-item {
+            min-width: 0;
+            padding-top: 8px;
+            border-top: 1px solid var(--border-decorative);
+        }
+
+        .stat-item dt {
+            color: var(--text-muted);
+            font-size: 11px;
+        }
+
+        .stat-item dd {
+            margin-bottom: 0;
+            overflow: hidden;
+            font-family: Consolas, "Courier New", monospace;
+            font-size: 13px;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .histogram-region {
+            margin-top: 8px;
+        }
+
+        .histogram-head {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 12px;
+            min-height: 14px;
+        }
+
+        .histogram-head h3,
+        .histogram-head p {
+            margin: 0;
+        }
+
+        .histogram-head h3 {
+            font-size: 12px;
+        }
+
+        .histogram-status {
+            overflow: hidden;
+            text-align: right;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        #histogramCanvas {
+            width: 100%;
+            height: 48px;
+            margin-top: 4px;
+            background: var(--bg);
+            border: 1px solid var(--border-decorative);
+            border-radius: 4px;
+        }
+
+        .metadata-list {
+            margin-bottom: 0;
+        }
+
+        .metadata-row {
+            display: grid;
+            grid-template-columns: minmax(76px, auto) minmax(0, 1fr);
+            gap: 8px;
+            padding: 6px 0;
+            border-bottom: 1px solid var(--border-decorative);
+            font-size: 12px;
+        }
+
+        .metadata-row:last-child {
+            border-bottom: 0;
+        }
+
+        .metadata-row dt {
+            color: var(--text-muted);
+        }
+
+        .metadata-row dd {
+            min-width: 0;
+            margin-bottom: 0;
+            overflow-wrap: anywhere;
+            font-family: Consolas, "Courier New", monospace;
+        }
+
+        .error-message {
+            margin-bottom: 12px;
+            padding: 10px 12px;
+            color: var(--danger);
+            background: var(--danger-wash);
+            border: 1px solid var(--danger);
+            border-radius: 4px;
+        }
+
+        @media (max-width: 900px) {
+            .layout {
+                grid-template-columns: minmax(0, 1fr);
+            }
+
+        }
+
+        @media (max-width: 560px) {
+            body {
+                padding: 10px;
+            }
+
+            .transport-row {
+                align-items: stretch;
+                flex-direction: column;
+            }
+
+            .transport-buttons button {
+                flex: 1;
+            }
+
+            .stats-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+
+            .page-actions {
+                width: 100%;
+                justify-content: space-between;
+            }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            * {
+                transition-duration: 0.01ms !important;
+                animation-duration: 0.01ms !important;
+            }
+        }
+    </style>
+    <script src="safetensor-reader.js" defer></script>
+    <script src="safetensor-viewer.js" defer></script>
+</head>
+<body>
+    <main class="container" id="viewerApp">
+        <header class="page-head">
+            <div>
+                <h1>Safetensors Viewer</h1>
+                <p class="page-subtitle">Inspect exported tensors without uploading them anywhere.</p>
+            </div>
+            <div class="page-actions">
+                <span class="status-text" id="fileSummary">No file loaded</span>
+                <a class="page-switch" href="index.html">
+                    <span aria-hidden="true">&larr;</span>
+                    <span>Noise Generator</span>
+                </a>
+            </div>
+        </header>
+
+        <div id="errorContainer" role="alert" aria-live="assertive"></div>
+
+        <div class="layout">
+            <section class="panel preview-panel" aria-labelledby="previewHeading">
+                <div class="panel-head">
+                    <h2 id="previewHeading">Preview</h2>
+                    <span class="hint mono" id="previewSummary">No tensor selected</span>
+                </div>
+
+                <div class="canvas-stage">
+                    <div class="empty-state" id="emptyState">
+                        Load an exported <strong>.safetensors</strong> file to inspect its frames and channels.
+                    </div>
+                    <canvas id="previewCanvas" class="hidden" width="512" height="512" role="img"
+                            aria-label="No safetensors preview loaded">
+                        Tensor preview. File details and statistics are available beside and below this canvas.
+                    </canvas>
+                </div>
+
+                <div class="scale-row" id="scaleRow" hidden>
+                    <output id="scaleMin" for="tensorSelect channelSelect">-</output>
+                    <div class="scale-bar" aria-hidden="true"></div>
+                    <output id="scaleMax" for="tensorSelect channelSelect">-</output>
+                </div>
+
+                <section class="display-inspector" aria-labelledby="frameHeading">
+                    <h3 id="frameHeading">Frame</h3>
+                    <div class="transport-row">
+                        <div class="transport-buttons">
+                            <button type="button" id="previousFrame" class="icon-button"
+                                    aria-label="Previous frame" title="Show the previous frame." disabled>
+                                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                    <rect x="5" y="5" width="2.5" height="14" rx="1"></rect>
+                                    <path d="M18 5.5 8 12l10 6.5Z"></path>
+                                </svg>
+                            </button>
+                            <button type="button" id="playPause" class="icon-button"
+                                    aria-label="Play frames" aria-pressed="false"
+                                    title="Start or stop frame playback." disabled>
+                                <svg class="icon icon-pause" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                    <rect x="7" y="5" width="3.5" height="14" rx="1"></rect>
+                                    <rect x="13.5" y="5" width="3.5" height="14" rx="1"></rect>
+                                </svg>
+                                <svg class="icon icon-play" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                    <path d="M8 5.5 19 12 8 18.5Z"></path>
+                                </svg>
+                            </button>
+                            <button type="button" id="nextFrame" class="icon-button"
+                                    aria-label="Next frame" title="Show the next frame." disabled>
+                                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                    <path d="M6 5.5 16 12 6 18.5Z"></path>
+                                    <rect x="16.5" y="5" width="2.5" height="14" rx="1"></rect>
+                                </svg>
+                            </button>
+                        </div>
+                        <div class="frame-control">
+                            <div class="control-head">
+                                <label for="frameSlider" title="Frame within the selected tensor sequence.">Frame</label>
+                                <span class="sr-only" id="frameSliderDescription">Frame within the selected tensor sequence.</span>
+                                <output id="frameValue" for="frameSlider">1 / 1</output>
+                            </div>
+                            <input type="range" id="frameSlider" min="0" max="0" step="1" value="0" disabled
+                                   aria-describedby="frameSliderDescription">
+                        </div>
+                    </div>
+
+                    <div class="pixel-row">
+                        <strong>Pixel:</strong>
+                        <output id="pixelValue" aria-live="off">Move the pointer over the preview</output>
+                    </div>
+
+                    <dl class="stats-grid" aria-label="Current frame statistics">
+                        <div class="stat-item"><dt>Minimum</dt><dd id="statMin">-</dd></div>
+                        <div class="stat-item"><dt>Maximum</dt><dd id="statMax">-</dd></div>
+                        <div class="stat-item"><dt>Mean</dt><dd id="statMean">-</dd></div>
+                        <div class="stat-item"><dt>Std. dev.</dt><dd id="statStd">-</dd></div>
+                    </dl>
+                    <section class="histogram-region" id="histogramRegion"
+                             aria-labelledby="histogramHeading" aria-busy="false">
+                        <div class="histogram-head">
+                            <h3 id="histogramHeading">All-frame distribution</h3>
+                            <p class="status-text histogram-status" id="histogramStatus" role="status">
+                                No raw tensor distribution loaded.
+                            </p>
+                        </div>
+                        <canvas id="histogramCanvas" width="560" height="48" role="img"
+                                aria-label="No all-frame histogram available">
+                            Distribution of raw tensor values across every frame.
+                        </canvas>
+                    </section>
+                </section>
+            </section>
+
+            <div class="controls-region">
+                <section class="panel" aria-labelledby="fileHeading">
+                    <h2 id="fileHeading">File</h2>
+                    <div class="control-group">
+                        <label for="fileDropZone" title="Open a local safetensors file. The file stays in this browser.">Safetensors File</label>
+                        <span class="sr-only" id="fileDropZoneDescription">Open a local safetensors file. The file stays in this browser.</span>
+                        <button type="button" id="fileDropZone" class="drop-zone"
+                                aria-describedby="fileDropZoneDescription">
+                            <span class="drop-zone-label">Choose a file, or drag one here</span>
+                            <span class="drop-zone-hint">SAFETENSORS</span>
+                        </button>
+                        <input type="file" id="fileInput" class="sr-only" accept=".safetensors"
+                               aria-label="Safetensors file">
+                    </div>
+                    <dl class="metadata-list" id="fileMetadata" hidden>
+                        <div class="metadata-row"><dt>Name</dt><dd id="fileName">-</dd></div>
+                        <div class="metadata-row"><dt>Size</dt><dd id="fileSize">-</dd></div>
+                        <div class="metadata-row"><dt>Tensors</dt><dd id="tensorCount">-</dd></div>
+                    </dl>
+                </section>
+
+                <section class="panel" aria-labelledby="tensorHeading">
+                    <h2 id="tensorHeading">Tensor</h2>
+                    <div class="control-grid">
+                        <div class="control-group span-all">
+                            <label for="tensorSelect" title="Tensor to inspect from the loaded file.">Tensor</label>
+                            <span class="sr-only" id="tensorSelectDescription">Tensor to inspect from the loaded file.</span>
+                            <select id="tensorSelect" aria-describedby="tensorSelectDescription" disabled>
+                                <option>No tensors loaded</option>
+                            </select>
+                        </div>
+                        <div class="control-group span-all" id="channelControlGroup" hidden>
+                            <label for="channelSelect" title="Channel within the value tensor.">Channel</label>
+                            <span class="sr-only" id="channelSelectDescription">Channel within the selected tensor.</span>
+                            <select id="channelSelect" aria-describedby="channelSelectDescription" disabled>
+                                <option value="0">Channel 0</option>
+                            </select>
+                        </div>
+                    </div>
+                    <dl class="metadata-list" id="tensorMetadata" hidden>
+                        <div class="metadata-row"><dt>Dtype</dt><dd id="tensorDtype">-</dd></div>
+                        <div class="metadata-row"><dt>Shape</dt><dd id="tensorShape">-</dd></div>
+                        <div class="metadata-row"><dt>Layout</dt><dd id="tensorLayout">-</dd></div>
+                        <div class="metadata-row"><dt>Payload</dt><dd id="tensorBytes">-</dd></div>
+                    </dl>
+                    <p class="hint" id="tensorMessage">Load a file to inspect its tensors.</p>
+                </section>
+
+                <section class="panel" aria-labelledby="displayHeading">
+                    <h2 id="displayHeading">Display</h2>
+                    <div class="control-grid">
+                        <div class="control-group">
+                            <label for="playbackFps" title="Base frame rate used during playback.">Playback FPS</label>
+                            <span class="sr-only" id="playbackFpsDescription">Base frame rate used during playback.</span>
+                            <select id="playbackFps" aria-describedby="playbackFpsDescription" disabled>
+                                <option value="10">10 FPS</option>
+                                <option value="15">15 FPS</option>
+                                <option value="20">20 FPS</option>
+                                <option value="24">24 FPS</option>
+                                <option value="30" selected>30 FPS</option>
+                                <option value="60">60 FPS</option>
+                            </select>
+                        </div>
+                        <div class="control-group">
+                            <label for="playbackSpeed" title="Multiplier applied to the playback frame rate.">Speed</label>
+                            <span class="sr-only" id="playbackSpeedDescription">Multiplier applied to the playback frame rate.</span>
+                            <select id="playbackSpeed" aria-describedby="playbackSpeedDescription" disabled>
+                                <option value="0.25">0.25x</option>
+                                <option value="0.5">0.5x</option>
+                                <option value="1" selected>1x</option>
+                                <option value="2">2x</option>
+                                <option value="4">4x</option>
+                            </select>
+                        </div>
+                    </div>
+                </section>
+            </div>
+        </div>
+    </main>
+</body>
+</html>
